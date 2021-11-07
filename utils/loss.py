@@ -94,35 +94,35 @@ class NpairLoss(nn.Module):
 
 
 
-class TripletLoss(torch.nn.Module):
-    def __init__(self, bit):
-        super(TripletLoss, self).__init__()
+# class TripletLoss(torch.nn.Module):
+#     def __init__(self, bit):
+#         super(TripletLoss, self).__init__()
 
-    def forward(self, u, u1, y):
+#     def forward(self, u, u1, y):
 
-        inner_product = 1 - u @ u1.t()
-        s = y @ y.t() > 0
-        count = 0
+#         inner_product = 1 - u @ u1.t()
+#         s = y @ y.t() > 0
+#         count = 0
 
-        loss1 = 0
-        for row in range(s.shape[0]):
-            # if has positive pairs and negative pairs
-            if s[row].sum() != 0 and (~s[row]).sum() != 0:
-                count += 1
-                theta_positive = inner_product[row][s[row] == 1]
-                theta_negative = inner_product[row][s[row] == 0]
-                triple = (theta_positive.unsqueeze(1) - theta_negative.unsqueeze(0) - 5).clamp(min=-100,
-                                                                                                             max=50)
-                loss1 += -(triple - torch.log(1 + torch.exp(triple))).mean()
+#         loss1 = 0
+#         for row in range(s.shape[0]):
+#             # if has positive pairs and negative pairs
+#             if s[row].sum() != 0 and (~s[row]).sum() != 0:
+#                 count += 1
+#                 theta_positive = inner_product[row][s[row] == 1]
+#                 theta_negative = inner_product[row][s[row] == 0]
+#                 triple = (theta_positive.unsqueeze(1) - theta_negative.unsqueeze(0) - 5).clamp(min=-100,
+#                                                                                                              max=50)
+#                 loss1 += -(triple - torch.log(1 + torch.exp(triple))).mean()
 
-        if count != 0:
-            loss1 = loss1 / count
-        else:
-            loss1 = 0
+#         if count != 0:
+#             loss1 = loss1 / count
+#         else:
+#             loss1 = 0
 
       
 
-        return loss1 
+#         return loss1 
 
 
 

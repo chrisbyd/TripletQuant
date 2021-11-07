@@ -1,125 +1,152 @@
+# encoding: utf-8
+"""
+@author:  liaoxingyu
+@contact: sherlockliao01@gmail.com
+"""
 import torch
-
-def pairwise_distances(q_embeddings, g_embeddings ,squared=False):
-	"""
-	||a-b||^2 = |a|^2 - 2*<a,b> + |b|^2
-	"""
-	# get dot product (batch_size, batch_size)
-	dot_product = q_embeddings.mm(g_embeddings.t())
-
-	# a vector
-	square_sum = dot_product.diag()
-
-	distances = square_sum.unsqueeze(1) - 2*dot_product + square_sum.unsqueeze(0)
-
-	distances = distances.clamp(min=0)
-
-	if not squared:
-		epsilon=1e-16
-		mask = torch.eq(distances, 0).float()
-		distances += mask * epsilon
-		distances = torch.sqrt(distances)
-		distances *= (1-mask)
-
-	return distances
-
-def get_valid_positive_mask(labels):
-	"""
-	To be a valid positive pair (a,p),
-		- a and p are different embeddings
-		- a and p have the same label
-	"""
-	indices_equal = torch.eye(labels.size(0)).byte()
-	indices_not_equal = ~indices_equal
-
-	label_equal = torch.eq(labels.unsqueeze(1), labels.unsqueeze(0))
-
-	mask = indices_not_equal & label_equal
-	return mask
-
-def get_valid_negative_mask(labels):
-	"""
-	To be a valid negative pair (a,n),
-		- a and n are different embeddings
-		- a and n have the different label
-	"""
-	indices_equal = torch.eye(labels.size(0)).byte()
-	indices_not_equal = ~indices_equal
-
-	label_not_equal = torch.ne(labels.unsqueeze(1), labels.unsqueeze(0))
-
-	mask = indices_not_equal & label_not_equal
-	return mask
+from torch import nn
 
 
-def get_valid_triplets_mask(q_label,g_label):
-	"""
-	To be valid, a triplet (a,p,n) has to satisfy:
-		- a,p,n are distinct embeddings
-		- a and p have the same label, while a and n have different label
-	"""
-	indices_equal = torch.eye(labels.size(0)).byte()
-  #  indices_equal = q_label @ g_label.t() >0
-	indices_not_equal = ~indices_equal
-	i_ne_j = indices_not_equal.unsqueeze(2)
-	i_ne_k = indices_not_equal.unsqueeze(1)
-	j_ne_k = indices_not_equal.unsqueeze(0)
-	distinct_indices = i_ne_j & i_ne_k & j_ne_k
+def normalize(x, axis=-1):
+    """Normalizing to unit length along the specified dimension.
+    Args:
+      x: pytorch Variable
+    Returns:
+      x: pytorch Variable, same shape as input
+    """
+    x = 1. * x / (torch.norm(x, 2, axis, keepdim=True).expand_as(x) + 1e-12)
+    return x
 
-	label_equal = q_label @ g_label.t() >0
-	i_eq_j = label_equal.unsqueeze(2)
-	i_eq_k = label_equal.unsqueeze(1)
-	i_ne_k = ~i_eq_k
-	valid_labels = i_eq_j & i_ne_k
 
-	mask = distinct_indices & valid_labels
-	return mask
+def euclidean_dist(x, y):
+    """
+    Args:
+      x: pytorch Variable, with shape [m, d]
+      y: pytorch Variable, with shape [n, d]
+    Returns:
+      dist: pytorch Variable, with shape [m, n]
+    """
+    m, n = x.size(0), y.size(0)
+    xx = torch.pow(x, 2).sum(1, keepdim=True).expand(m, n)
+    yy = torch.pow(y, 2).sum(1, keepdim=True).expand(n, m).t()
+    dist = xx + yy
+    dist.addmm_(1, -2, x, y.t())
+    dist = dist.clamp(min=1e-12).sqrt()  # for numerical stability
+    return dist
 
-def batch_all_triplet_loss(q_labels,g_labels, q_embeddings, g_embeddings, margin, squared=False):
-	"""
-	get triplet loss for all valid triplets and average over those triplets whose loss is positive.
-	"""
 
-	distances = pairwise_distances(q_embeddings,g_embeddings, squared=squared)
+def hard_example_mining(dist_mat, labels, return_inds=False):
+    """For each anchor, find the hardest positive and negative sample.
+    Args:
+      dist_mat: pytorch Variable, pair wise distance between samples, shape [N, N]
+      labels: pytorch LongTensor, with shape [N]
+      return_inds: whether to return the indices. Save time if `False`(?)
+    Returns:
+      dist_ap: pytorch Variable, distance(anchor, positive); shape [N]
+      dist_an: pytorch Variable, distance(anchor, negative); shape [N]
+      p_inds: pytorch LongTensor, with shape [N];
+        indices of selected hard positive samples; 0 <= p_inds[i] <= N - 1
+      n_inds: pytorch LongTensor, with shape [N];
+        indices of selected hard negative samples; 0 <= n_inds[i] <= N - 1
+    NOTE: Only consider the case in which all labels have same num of samples,
+      thus we can cope with all anchors in parallel.
+    """
 
-	anchor_positive_dist = distances.unsqueeze(2)
-	anchor_negative_dist = distances.unsqueeze(1)
-	triplet_loss = anchor_positive_dist - anchor_negative_dist + margin
+    assert len(dist_mat.size()) == 2
+    assert dist_mat.size(0) == dist_mat.size(1)
+    N = dist_mat.size(0)
 
-	# get a 3D mask to filter out invalid triplets
-	mask = get_valid_triplets_mask(q_labels, g_labels)
+    # shape [N, N]
+    is_pos = labels @ labels.t() > 0
+    is_neg = ~is_pos
 
-	triplet_loss = triplet_loss * mask.float()
-	triplet_loss.clamp_(min=0)
+    # `dist_ap` means distance(anchor, positive)
+    # both `dist_ap` and `relative_p_inds` with shape [N, 1]
+    dist_max = dist_mat * is_pos.float()
+    dist_min = dist_mat * ((is_pos.float() * 10000) + is_neg) 
 
-	# count the number of positive triplets
-	epsilon = 1e-16
-	num_positive_triplets = (triplet_loss > 0).float().sum()
-	num_valid_triplets = mask.float().sum()
-	fraction_positive_triplets = num_positive_triplets / (num_valid_triplets + epsilon)
+    dist_ap, relative_p_inds = torch.max(
+        dist_max, 1, keepdim=True)
+    
+    # `dist_an` means distance(anchor, negative)
+    # both `dist_an` and `relative_n_inds` with shape [N, 1]
+    dist_an, relative_n_inds = torch.min(
+        dist_min, 1, keepdim=True)
+    # shape [N]
+    dist_ap = dist_ap.squeeze(1)
+    dist_an = dist_an.squeeze(1)
 
-	triplet_loss = triplet_loss.sum() / (num_positive_triplets + epsilon)
+    if return_inds:
+        # shape [N, N]
+        ind = (labels.new().resize_as_(labels)
+               .copy_(torch.arange(0, N).long())
+               .unsqueeze(0).expand(N, N))
+        # shape [N, 1]
+        p_inds = torch.gather(
+            ind[is_pos].contiguous().view(N, -1), 1, relative_p_inds.data)
+        n_inds = torch.gather(
+            ind[is_neg].contiguous().view(N, -1), 1, relative_n_inds.data)
+        # shape [N]
+        p_inds = p_inds.squeeze(1)
+        n_inds = n_inds.squeeze(1)
+        return dist_ap, dist_an, p_inds, n_inds
 
-	return triplet_loss, fraction_positive_triplets
+    return dist_ap, dist_an
 
-def batch_hard_triplet_loss(labels, embeddings, margin, squared=False):
-	"""
-	- compute distance matrix
-	- for each anchor a0, find the (a0,p0) pair with greatest distance s.t. a0 and p0 have the same label
-	- for each anchor a0, find the (a0,n0) pair with smallest distance s.t. a0 and n0 have different label
-	- compute triplet loss for each triplet (a0, p0, n0), average them
-	"""
-	distances = pairwise_distances(embeddings, squared=squared)
 
-	mask_positive = get_valid_positive_mask(labels)
-	hardest_positive_dist = (distances * mask_positive.float()).max(dim=1)[0]
+class TripletLoss(object):
+    """Modified from Tong Xiao's open-reid (https://github.com/Cysu/open-reid).
+    Related Triplet Loss theory can be found in paper 'In Defense of the Triplet
+    Loss for Person Re-Identification'."""
 
-	mask_negative = get_valid_negative_mask(labels)
-	max_negative_dist = distances.max(dim=1,keepdim=True)[0]
-	distances = distances + max_negative_dist * (~mask_negative).float()
-	hardest_negative_dist = distances.min(dim=1)[0]
+    def __init__(self, margin=0.3):
+        self.margin = margin
+        if margin is not None:
+            self.ranking_loss = nn.MarginRankingLoss(margin=margin)
+        else:
+            self.ranking_loss = nn.SoftMarginLoss()
 
-	triplet_loss = (hardest_positive_dist - hardest_negative_dist + margin).clamp(min=0)
-	triplet_loss = triplet_loss.mean()
+    def __call__(self, quantized_feat,global_feat, labels, normalize_feature=False):
+        if normalize_feature:
+            global_feat = normalize(global_feat, axis=-1)
+        dist_mat = euclidean_dist(quantized_feat, global_feat)
+ 
+        dist_ap, dist_an = hard_example_mining(
+            dist_mat, labels)
+        y = dist_an.new().resize_as_(dist_an).fill_(1)
+        if self.margin is not None:
+            loss = self.ranking_loss(dist_an, dist_ap, y)
+        else:
+            loss = self.ranking_loss(dist_an - dist_ap, y)
+        return loss, dist_ap, dist_an
 
-	return triplet_loss
+class CrossEntropyLabelSmooth(nn.Module):
+    """Cross entropy loss with label smoothing regularizer.
+
+    Reference:
+    Szegedy et al. Rethinking the Inception Architecture for Computer Vision. CVPR 2016.
+    Equation: y = (1 - epsilon) * y + epsilon / K.
+
+    Args:
+        num_classes (int): number of classes.
+        epsilon (float): weight.
+    """
+    def __init__(self, num_classes, epsilon=0.1, use_gpu=True):
+        super(CrossEntropyLabelSmooth, self).__init__()
+        self.num_classes = num_classes
+        self.epsilon = epsilon
+        self.use_gpu = use_gpu
+        self.logsoftmax = nn.LogSoftmax(dim=1)
+
+    def forward(self, inputs, targets):
+        """
+        Args:
+            inputs: prediction matrix (before softmax) with shape (batch_size, num_classes)
+            targets: ground truth labels with shape (num_classes)
+        """
+        log_probs = self.logsoftmax(inputs)
+        targets = torch.zeros(log_probs.size()).scatter_(1, targets.unsqueeze(1).data.cpu(), 1)
+        if self.use_gpu: targets = targets.cuda()
+        targets = (1 - self.epsilon) * targets + self.epsilon / self.num_classes
+        loss = (- targets * log_probs).mean(0).sum()
+        return loss

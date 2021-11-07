@@ -14,8 +14,8 @@ from validate import pq_validate
 from tqdm import tqdm
 # from utils.fastap_loss import FastAPLoss
 from utils.adapt_fastap_loss import FastAPLoss 
-from utils.triplet_loss import batch_all_triplet_loss
-from utils.loss import SupConLoss, N_PQ_loss, CLS_loss, raw_hash_loss, CLS_bce_loss, TripletLoss
+from utils.triplet_loss import TripletLoss
+from utils.loss import SupConLoss, N_PQ_loss, CLS_loss, raw_hash_loss, CLS_bce_loss
 from utils.functions import intra_norm, my_soft_assignment
 from networks import GPQSoftMaxNet
 
@@ -31,6 +31,7 @@ def train(config):
     lam_2 = config['lam_2']
     train_loader, test_loader, dataset_loader, num_train, num_test, num_dataset = get_data(config)
     Ap_loss = FastAPLoss()
+    triLoss = TripletLoss()
     config["num_train"] = num_train
     feat_dim = config['len_code'] * config['n_book']
     model = Model(config= config)
@@ -98,7 +99,7 @@ def train(config):
         
            # loss = hash_loss + lam_2 * clss_loss + con_loss_asym + con_loss_descriptor
           #  loss =   ap_loss
-            loss = batch_all_triplet_loss(label,label,u,descriptor_S, margin=0.6 )
+            loss = triLoss(u, descriptor_S, label)[0]
             train_loss += loss.item()
 
             #print('clss_loss', clss_loss.item(), hash_loss.item())
